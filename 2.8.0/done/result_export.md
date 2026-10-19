@@ -25,8 +25,46 @@ The categories below are as follows:
 
 ## export
 ### bc breaking
-- `strict=False` is set as the default in `torch.export.export` and `export_for_training`. ([#148790](https://github.com/pytorch/pytorch/pull/148790), [#150941](https://github.com/pytorch/pytorch/pull/150941))
-- Remove `torch.export.export_for_inference` in favor of doing `torch.export.export_for_training().run_decompositions()`. ([#149078](https://github.com/pytorch/pytorch/pull/149078))
+- **`strict=False` is now set as the default in `torch.export.export` and `export_for_training`; this differs from the previous release default of `strict=True`. ([#148790](https://github.com/pytorch/pytorch/pull/148790), [#150941](https://github.com/pytorch/pytorch/pull/150941))**
+
+  To get the old default behavior, please explicitly pass `strict=True`.
+
+  Version 2.7.0
+  ```python
+  import torch
+
+  # default behavior is strict=True
+  torch.export.export(...)
+  torch.export.export_for_training(...)
+  ```
+
+  Version 2.8.0
+  ```python
+  import torch
+
+  # strict=True must be explicitly passed to get the old behavior
+  torch.export.export(..., strict=True)
+  torch.export.export_for_training(..., strict=True)
+  ```
+- **`torch.export.export_for_inference` has been removed in favor of `torch.export.export_for_training().run_decompositions()`. ([#149078](https://github.com/pytorch/pytorch/pull/149078))**
+
+  Version 2.7.0
+  ```python
+  import torch
+
+  ...
+  exported_program = torch.export.export_for_inference(mod, args, kwargs)
+  ```
+
+  Version 2.8.0
+  ```python
+  import torch
+
+  ...
+  exported_program = torch.export.export_for_training(
+      mod, args, kwargs
+  ).run_decompositions(decomp_table=decomp_table)
+  ```
 ### deprecation
 ### new features
 - A new version of export `draft-export` -- https://docs.pytorch.org/docs/main/draft_export.html ([#152637](https://github.com/pytorch/pytorch/pull/152637), [#153219](https://github.com/pytorch/pytorch/pull/153219), [#149465](https://github.com/pytorch/pytorch/pull/149465), [#153627](https://github.com/pytorch/pytorch/pull/153627), [#154190](https://github.com/pytorch/pytorch/pull/154190), [#155744](https://github.com/pytorch/pytorch/pull/155744), [#150876](https://github.com/pytorch/pytorch/pull/150876), [#150948](https://github.com/pytorch/pytorch/pull/150948), [#151051](https://github.com/pytorch/pytorch/pull/151051), [#151065](https://github.com/pytorch/pytorch/pull/151065), [#150809](https://github.com/pytorch/pytorch/pull/150809), [#151797](https://github.com/pytorch/pytorch/pull/151797))
@@ -51,6 +89,8 @@ The categories below are as follows:
 - Suggest dynamic re-export in input constraints hook ([#151624](https://github.com/pytorch/pytorch/pull/151624))
 - Improve handling of builtin ops (min, max, math.pow) ([#151348](https://github.com/pytorch/pytorch/pull/151348))
 - Add `from_node` metadata for nodes in gm.module() ([#155053](https://github.com/pytorch/pytorch/pull/155053))
+- Inline `jit.script`ed functions in export ([#155180](https://github.com/pytorch/pytorch/pull/155180))
+- Improve attr mismatch msg ([#149576](https://github.com/pytorch/pytorch/pull/149576))
 
 ### bug fixes
 - Fix aten.is_nonzero for more than one elem tensors ([#149637](https://github.com/pytorch/pytorch/pull/149637))
@@ -101,6 +141,7 @@ The categories below are as follows:
 - Better type annotation for lift_constants_pass ([#152072](https://github.com/pytorch/pytorch/pull/152072))
 - Refactor `InputAdapter` (#152459) ([#152575](https://github.com/pytorch/pytorch/pull/152575))
 - Swap functorch --> torch._higher_order_ops ([#152620](https://github.com/pytorch/pytorch/pull/152620))
+- Fix bug in `detect_attr_assignment` ([#151824](https://github.com/pytorch/pytorch/pull/151824))
 
 ### Untopiced
 

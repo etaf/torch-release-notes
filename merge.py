@@ -1,0 +1,294 @@
+import argparse
+import glob
+import marko
+import os
+import re
+
+from marko.md_renderer import MarkdownRenderer
+
+
+def get_arg_parser():
+    parser = argparse.ArgumentParser(
+        prog='merge',
+        description='Merges a directory of results .md files into a single .md file')
+    parser.add_argument('-d', '--dir', required=True)
+    parser.add_argument('-o', '--output', required=True)
+    parser.add_argument('-v', '--version', default=None,
+                        help='release version for the title (default: inferred from --dir)')
+    return parser
+
+
+# returns a tuple of (module name, dict of category name -> [list of commits])
+def parse_result_md(md_text):
+    m = marko.Markdown(parser=marko.parser.Parser, renderer=MarkdownRenderer)
+    ast = m.parse(md_text)
+
+    # pull out the module name; it should be in a single level 2 heading.
+    # the worksheet preamble also uses level 2 headings for numbered instructions
+    # ("## 1. ...", "## 2. ...", etc.), so filter those out.
+    module_name_heading = [c for c in ast.children
+                           if isinstance(c, marko.block.Heading) and c.level == 2
+                           and not re.match(r'^\d+\.', c.children[0].children)]
+    assert len(module_name_heading) == 1
+    module_name = module_name_heading[0].children[0].children
+
+    # get all the level 3 headings that correspond to commit categories
+    headings = [(c, i) for (i, c) in enumerate(ast.children)
+                if isinstance(c, marko.block.Heading) and c.level == 3]
+
+    # each level 3 heading should have a single RawText child with children as a str
+    commit_info = {}
+    for h, h_child_idx in headings:
+        assert len(h.children) == 1 and isinstance(h.children[0], marko.inline.RawText)
+        raw_text = h.children[0]
+        assert isinstance(raw_text.children, str)
+        commit_category = raw_text.children.lower()
+
+        # commits should be in a list after the heading
+        # seeing the next heading before a list implies that there is no list
+        commit_list = None
+        for i in range(h_child_idx + 1, len(ast.children)):
+            if isinstance(ast.children[i], marko.block.List):
+                commit_list = ast.children[i]
+                break
+            elif isinstance(ast.children[i], marko.block.Heading):
+                break
+
+        # this category may be empty
+        if commit_list is None:
+            continue
+
+        # render each child commit line back as markdown
+        commits = [m.render(commit) for commit in commit_list.children]
+        num_commits = len(commits)
+        print(f'found {num_commits} commits for module {module_name} + category {commit_category}')
+        commit_info[commit_category] = commits
+    return module_name, commit_info
+
+
+# Sorts commits primarily by category name instead of by module name
+# input is per module commits:
+#   dict of module_name -> {dict of category name -> [list of commits]}
+# returns per category commits:
+#   dict of category name -> {dict of module name -> [list of commits]}
+def sort_commits_by_category(per_module_commits):
+    per_category_commits = {}
+    for (module_name, cat_commits) in per_module_commits.items():
+        for (cat_name, cat_list) in cat_commits.items():
+            if cat_name not in per_category_commits:
+                per_category_commits[cat_name] = {}
+            per_category_commits[cat_name][module_name] = cat_list
+    return per_category_commits
+
+
+def render_commit(commit):
+    # `commit` is the rendered markdown for a single list item. Emit it as a
+    # bullet, indenting every continuation line by 2 spaces so nested paragraphs
+    # and fenced code blocks stay part of the list item (otherwise lines like
+    # "# comment" inside a code fence get parsed as top-level headings).
+    lines = commit.rstrip("\n").split("\n")
+    rendered = [f"- {lines[0]}"]
+    for line in lines[1:]:
+        rendered.append(f"  {line}" if line.strip() else "")
+    return "\n".join(rendered)
+
+
+def write_output(per_category_commits, output_filename, version="X.x.x"):
+    # defines the order in which these are written in the output file + nicely formatted name
+    # note that "not user facing" is intentionally left out
+    category_order = [
+        ("bc breaking", "Backwards Incompatible Changes"),
+        ("deprecation", "Deprecations"),
+        ("new features", "New Features"),
+        ("improvements", "Improvements"),
+        ("bug fixes", "Bug Fixes"),
+        ("performance", "Performance"),
+        ("docs", "Documentation"),
+        ("security", "Security"),
+        ("devs", "Developers"),
+    ]
+
+    # short name -> nice name
+    module_name_mapping = {
+        'functorch': 'Functorch',
+        'fx': 'FX',
+        'autograd_frontend': 'Autograd',
+        'foreach_frontend': 'Foreach',
+        'mps': 'MPS',
+        'onnx': 'ONNX',
+        'optim': 'Optimizer',
+        'optimizer_frontend': 'Optimizer Frontend',
+        'sparse_frontend': 'Sparse Frontend',
+        'cpp_frontend': 'C++ Frontend',
+        'nn_frontend': 'torch.nn',
+        'caffe2': 'Caffe2',
+        'complex_frontend': 'Complex Frontend',
+        'mobile': 'Mobile',
+        'package': 'Package',
+        'vulkan': 'Vulkan',
+        'python_frontend': 'Python Frontend',
+        'distributed (checkpoint)': 'Distributed Checkpointing',
+        'distributed (c10d)': 'Distributed (c10d)',
+        'distributed (ddp)': 'DistributedDataParallel (DDP)',
+        'distributed (fsdp)': 'Distributed FSDP',
+        'distributed (fsdp2)': 'Distributed FSDP2',
+        'distributed (dtensor)': 'DTensor',
+        'distributed (sharded)': 'Distributed Sharded',
+        'distributed (symm_mem)': 'Symmetric Memory',
+        'distributed (miscellaneous)': 'Distributed (Miscellaneous)',
+        'distributed (pipeline)': 'Distributed Pipelining',
+        'distributed (torchelastic)': 'TorchElastic',
+        'distributed (rpc)': 'Distributed RPC',
+        'DeviceMesh': 'DeviceMesh',
+        'Uncategorized': 'Uncategorized',
+        'benchmark': 'Benchmark',
+        'aotdispatcher': 'AOTDispatcher',
+        'aot autograd': 'AOTAutograd',
+        'dataloader_frontend': 'Dataloader Frontend',
+        'jit': 'JIT',
+        'linalg_frontend': 'Linear Algebra Frontend',
+        'inductor (aoti)': 'Ahead-Of-Time Inductor (AOTI)',
+        'cuda': 'CUDA',
+        'cudnn': 'cuDNN',
+        'cpu (x86)': 'CPU (x86)',
+        'cpu (aarch64)': 'CPU (AArch64)',
+        'xpu': 'XPU',
+        'export': 'Export',
+        'quantization': 'Quantization',
+        'releng': 'Release Engineering',
+        'rocm': 'ROCm',
+        'build_frontend': 'Build Frontend',
+        'inductor': 'Inductor',
+        'composability': 'Composability',
+        'distributed': 'Distributed',
+        'profiler': 'Profiler',
+        'dynamo': 'Dynamo',
+        'torch.func': 'torch.func',
+        'nested tensor_frontend': 'Nested Tensor (NJT)',
+        'devx': 'Developer Experience',
+        'indexing': 'Indexing',
+    }
+
+    # General order in which modules are written within each section. Modules
+    # not listed here are appended, sorted alphabetically, after these.
+    module_order = [
+        'python_frontend',
+        'dataloader_frontend',
+        'nn_frontend',
+        'optim',
+        'optimizer_frontend',
+        'autograd_frontend',
+        # distributed family, keeping their internal ordering
+        'distributed',
+        'distributed (c10d)',
+        'distributed (checkpoint)',
+        'distributed (dtensor)',
+        'distributed (ddp)',
+        'distributed (fsdp)',
+        'distributed (fsdp2)',
+        'distributed (sharded)',
+        'distributed (symm_mem)',
+        'distributed (miscellaneous)',
+        'distributed (pipeline)',
+        'distributed (torchelastic)',
+        'distributed (rpc)',
+        'DeviceMesh',
+        'Uncategorized',
+        'linalg_frontend',
+        'indexing',
+        'profiler',
+        'fx',
+        'dynamo',
+        'inductor',
+        'inductor (aoti)',
+        'export',
+        'aotdispatcher',
+        'aot autograd',
+        'composability',
+        'quantization',
+        'nested tensor_frontend',
+        'foreach_frontend',
+        'onnx',
+        'cpp_frontend',
+        'devx',
+        'build_frontend',
+        'releng',
+        'cuda',
+        'cudnn',
+        'cpu (x86)',
+        'cpu (aarch64)',
+        'mps',
+        'rocm',
+        'xpu',
+    ]
+    module_rank = {name: i for i, name in enumerate(module_order)}
+
+    with open(output_filename, 'w') as f:
+        # title + table of contents + highlights placeholder (matches prior releases)
+        f.write(f"# PyTorch {version} Release Notes\n\n")
+        f.write("- [Highlights](#highlights)\n")
+        f.write("- [Backwards Incompatible Changes](#backwards-incompatible-changes)\n")
+        f.write("- [Deprecations](#deprecations)\n")
+        f.write("- [New Features](#new-features)\n")
+        f.write("- [Improvements](#improvements)\n")
+        f.write("- [Bug fixes](#bug-fixes)\n")
+        f.write("- [Performance](#performance)\n")
+        f.write("- [Documentation](#documentation)\n")
+        f.write("- [Developers](#developers)\n")
+        f.write("- [Security](#security)\n\n")
+        f.write("# Highlights\n\n")
+        f.write("TODO\n\n")
+        f.write("For more details about these highlighted features, you can look "
+                "at the release blogpost. Below are the full release notes for this "
+                "release.\n\n")
+
+        for cat_short_name, cat_nice_name in category_order:
+            f.write(f"# {cat_nice_name}\n\n")
+            if cat_short_name not in per_category_commits:
+                print(f'Found no commits for category {cat_short_name}; skipping')
+                continue
+            cat_commits = per_category_commits[cat_short_name]
+            # order by the maintainer-preferred module order; anything not listed
+            # falls to the end, sorted alphabetically
+            module_names = sorted(
+                cat_commits.keys(),
+                key=lambda m: (module_rank.get(m, len(module_rank)), m))
+            for module_name in module_names:
+                assert module_name in module_name_mapping, f"no nice name for {module_name} found; mapping needs to be updated"
+                nice_module_name = module_name_mapping[module_name]
+                f.write(f"## {nice_module_name}\n\n")
+                rendered = [render_commit(c) for c in cat_commits[module_name]]
+                # if any entry spans multiple lines, render a "loose" list with a
+                # blank line between every item so markdown stays well-formed
+                loose = any("\n" in r for r in rendered)
+                f.write(("\n\n" if loose else "\n").join(rendered))
+                f.write("\n\n")
+
+        # Module blocks are separated by a blank line, but the completed file
+        # should end with one newline rather than an additional blank line.
+        f.seek(f.tell() - 1)
+        f.truncate()
+
+
+def main(args):
+    md_pattern = os.path.join(args.dir, "result_*.md")
+    md_filenames = glob.glob(md_pattern)
+    per_module_commits = {}
+    for md_filename in md_filenames:
+        with open(md_filename, 'r') as f:
+            md_text = f.read()
+        module_name, commit_info = parse_result_md(md_text)
+        per_module_commits[module_name] = commit_info
+    per_category_commits = sort_commits_by_category(per_module_commits)
+    # infer the version (e.g. "2.13.0") from the parent dir of the worksheets,
+    # unless overridden explicitly
+    version = args.version
+    if version is None:
+        version = os.path.basename(os.path.dirname(os.path.normpath(args.dir))) or "X.x.x"
+    write_output(per_category_commits, args.output, version)
+
+
+if __name__ == "__main__":
+    parser = get_arg_parser()
+    args = parser.parse_args()
+    main(args)
